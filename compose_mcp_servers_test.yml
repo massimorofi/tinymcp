@@ -29,14 +29,14 @@ services:
     volumes:
       - ${HOME}:/home/user:rw
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: always
+    restart: no
 
   # Hacker News MCP (stdio-based MCP)
   hackernews-mcp:
     image: mcp/hackernews-mcp:latest
     stdin_open: true
     tty: true
-    restart: always
+    restart: no
 
   # Google Flights MCP (stdio-based MCP)
   google-flights:
@@ -45,7 +45,7 @@ services:
     tty: true
     environment:
       - SERPAPI_API_KEY=${SERPAPI_API_KEY}
-    restart: always
+    restart: no
 
 networks:
   default:
