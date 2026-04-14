@@ -1,0 +1,113 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Enterprise MCP Gateway API",
+    "description": "Unified entry point for Model Context Protocol (MCP) tool discovery and execution.",
+    "version": "1.1.0"
+  },
+  "servers": [
+    { "url": "https://mcp-gateway.internal/v1", "description": "Production Gateway" }
+  ],
+  "paths": {
+    "/registry/servers": {
+      "get": {
+        "summary": "List all upstream MCP servers",
+        "tags": ["Registry"],
+        "responses": {
+          "200": {
+            "description": "List of servers and their health status",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/McpServer" } } }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register a new MCP server (stdio or SSE)",
+        "tags": ["Registry"],
+        "requestBody": {
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/McpServer" } } }
+        },
+        "responses": { "201": { "description": "Registration successful" } }
+      }
+    },
+    "/sessions": {
+      "post": {
+        "summary": "Initialize a unified MCP session",
+        "description": "Performs the MCP 'initialize' handshake across all registered backends and returns a Gateway Session ID.",
+        "tags": ["Session"],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "sessionId": { "type": "string" },
+                    "mcpVersion": { "type": "string", "example": "1.0.0" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/execute": {
+      "post": {
+        "summary": "Call a tool (Unified Proxy)",
+        "description": "Routes the JSON-RPC call to the appropriate upstream server based on the tool name prefix.",
+        "tags": ["Data Plane"],
+        "parameters": [
+          { "name": "X-Session-ID", "in": "header", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/JsonRpcRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Tool execution result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcResponse" } } } },
+          "403": { "description": "Security policy blocked tool execution" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "McpServer": {
+        "type": "object",
+        "required": ["id", "transport"],
+        "properties": {
+          "id": { "type": "string", "example": "github-tools" },
+          "transport": { "type": "string", "enum": ["stdio", "sse"] },
+          "command": { "type": "string", "description": "For stdio: path to executable" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "url": { "type": "string", "description": "For SSE: the remote server URL" },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } },
+          "status": { "type": "string", "enum": ["connected", "disconnected", "error"] }
+        }
+      },
+      "JsonRpcRequest": {
+        "type": "object",
+        "required": ["jsonrpc", "method", "id"],
+        "properties": {
+          "jsonrpc": { "type": "string", "const": "2.0" },
+          "method": { "type": "string", "example": "tools/call" },
+          "params": { "type": "object" },
+          "id": { "type": "integer" }
+        }
+      },
+      "JsonRpcResponse": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": { "type": "string" },
+          "id": { "type": "integer" },
+          "result": { "type": "object" },
+          "error": { "type": "object" }
+        }
+      }
+    }
+  }
+}

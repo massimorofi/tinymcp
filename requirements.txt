@@ -1,0 +1,6 @@
+mcp>=0.1.0
+fastapi
+uvicorn
+python-dotenv
+httpx
+pytest

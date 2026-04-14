@@ -1,0 +1,52 @@
+services:
+  # MCP Gateway
+  mcp-gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - SECRETS_PATH=/app/secrets.json
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - desktop-commander
+      - hackernews-mcp
+      - google-flights
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Desktop Commander (stdio-based MCP)
+  desktop-commander:
+    image: mcp/desktop-commander:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${HOME}:/home/user:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+
+  # Hacker News MCP (stdio-based MCP)
+  hackernews-mcp:
+    image: mcp/hackernews-mcp:latest
+    stdin_open: true
+    tty: true
+    restart: always
+
+  # Google Flights MCP (stdio-based MCP)
+  google-flights:
+    image: mcp/google-flights:latest
+    stdin_open: true
+    tty: true
+    environment:
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
+    restart: always
+
+networks:
+  default:
+    name: mcp-network
