@@ -1,3 +1,11 @@
+"""
+Messages module - Handle MCP message endpoints.
+
+Provides endpoints for:
+- Processing incoming MCP messages
+- Server-Sent Events (SSE) connections for streaming
+"""
+
 import json
 from typing import Any, AsyncGenerator, Optional
 
@@ -10,9 +18,14 @@ from execution import handle_message
 
 
 async def handle_messages_endpoint(request: Request) -> JSONResponse:
-    """Handle incoming messages from clients."""
+    """
+    Handle incoming messages from clients via POST /messages.
+
+    Accepts JSON-RPC formatted messages and forwards them
+    to the appropriate MCP server for processing.
+    """
     config = load_config()
-    
+
     try:
         data: dict[str, Any] = await request.json()
         if "id" not in data:
@@ -33,39 +46,50 @@ async def handle_messages_endpoint(request: Request) -> JSONResponse:
 
 
 async def handle_sse_endpoint(request: Request) -> StreamingResponse:
-    """Handle SSE connections."""
+    """
+    Handle SSE connections for streaming responses.
+
+    Establishes an SSE connection to the MCP server,
+    sends an initialize message, and maintains the
+    connection for streaming event delivery.
+    """
     config = load_config()
-    
+
     if not config.get("mcpServers"):
         raise HTTPException(status_code=500, detail="No MCP servers configured")
-    
-    # Find the first MCP server name for heartbeat
+
+    # Find first configured server for heartbeat
     mcp_server_name = None
     for server_id in config.get("mcpServers", {}).keys():
         if server_id:
             mcp_server_name = server_id
             break
-    
+
     sse = SseServerTransport("/messages")
-    
+
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             async with sse.connect_sse(request.url.path):
+                # Send initialize method to establish MCP session
                 await sse.handle_post_message({"method": "initialize"})
-                
+
                 # Send heartbeat to gateway when connection established
                 if mcp_server_name:
                     try:
                         import urllib.request
-                        heartbeat_url = request.url.replace(path="/heartbeat", query=f"server={mcp_server_name}")
-                        req = urllib.request.Request(str(heartbeat_url), method='GET')
+
+                        heartbeat_url = request.url.replace(
+                            path="/heartbeat", query=f"server={mcp_server_name}"
+                        )
+                        req = urllib.request.Request(str(heartbeat_url), method="GET")
                         urllib.request.urlopen(req, timeout=5)
                     except Exception:
                         pass  # Ignore heartbeat failures
-                
-                yield "data: {\"status\": \"connected\"}\n\n"
+
+                # Send connection confirmation
+                yield 'data: {"status": "connected"}\n\n'
         except Exception as e:
             print(f"[SSE] Connection error: {e}")
             raise
-    
+
     return StreamingResponse(event_stream(), media_type="text/event-stream")
