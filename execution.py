@@ -10,17 +10,55 @@ Provides functions for:
 import json
 import time
 import uuid
+import asyncio
+import threading
 from typing import Any, Optional
 
 from config import load_config
 from registry import discover_docker_mcp_servers
-from transports import handle_npx_stdio, handle_http_stdio, handle_docker_stdio
+from transports import handle_npx_stdio, handle_http_stdio, handle_docker_stdio, _npx_process_lock, _npx_processes, _docker_process_lock, _docker_processes
 from fastapi import HTTPException
 from mcp.server.sse import SseServerTransport
 
 # In-memory storage for active sessions and connected servers
 sessions: dict[str, dict[str, Any]] = {}
 _connectedServers: dict[str, dict[str, Any]] = {}
+
+
+async def cleanup_dead_processes():
+    """Background task to periodically clean up dead processes."""
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            # Clean up dead npx processes
+            with _npx_process_lock:
+                dead_keys = []
+                for key, proc in _npx_processes.items():
+                    if proc.poll() is not None:
+                        dead_keys.append(key)
+                
+                for key in dead_keys:
+                    del _npx_processes[key]
+                    if key in _npx_process_locks:
+                        del _npx_process_locks[key]
+                    print(f"[Cleanup] Removed dead npx process: {key}")
+            
+            # Clean up dead docker processes
+            with _docker_process_lock:
+                dead_keys = []
+                for key, proc in _docker_processes.items():
+                    if proc.poll() is not None:
+                        dead_keys.append(key)
+                
+                for key in dead_keys:
+                    del _docker_processes[key]
+                    if key in _docker_process_locks:
+                        del _docker_process_locks[key]
+                    print(f"[Cleanup] Removed dead docker process: {key}")
+                    
+        except Exception as e:
+            print(f"[Cleanup] Error during process cleanup: {e}")
 
 
 def create_session() -> dict[str, Any]:

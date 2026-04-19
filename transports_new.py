@@ -181,74 +181,48 @@ def _get_or_create_session(url: str) -> str:
         return _http_sessions[url]["session_id"]
 
 
-def _is_initialized(url: str) -> bool:
-    """Check if the session for this URL has been initialized."""
-    with _http_session_lock:
-        return _http_sessions.get(url, {}).get("initialized", False)
-
-
 async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
     """
     Handle MCP communication via HTTP (streamable-http transport).
 
     Forwards JSON-RPC requests to HTTP-based MCP servers
     (SSE or streamable-http transports). Handles SSE-formatted
-    responses and session management. Properly handles MCP
-    initialization handshake for streamable-http servers.
+    responses and session management.
     """
     session_id = _get_or_create_session(url)
-
-    # MCP initialize message (sent automatically on first request)
-    init_message = {
-        "jsonrpc": "2.0",
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
-        },
-        "id": 0,
-    }
-
+    
     try:
         async with httpx.AsyncClient(
             timeout=30.0,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
         ) as client:
+            # Add session ID header if we have one
             headers = {
                 "Accept": "application/json, text/event-stream",
                 "Content-Type": "application/json",
             }
-
-            # Send initialize first if not yet initialized
-            if not _is_initialized(url):
-                resp = await client.post(url, json=init_message, headers=headers)
-
-                # Store session ID from response header
-                resp_session_id = resp.headers.get("mcp-session-id")
-                if resp_session_id:
-                    with _http_session_lock:
-                        _http_sessions[url]["session_id"] = resp_session_id
-                        session_id = resp_session_id
-                _http_sessions[url]["initialized"] = True
-
-            # Now send the actual request with session ID
-            headers["MCP-Session-Id"] = session_id
+            if _http_sessions[url]["initialized"]:
+                headers["MCP-Session-Id"] = session_id
+            
             response = await client.post(
-                url,
+                url, 
                 json=data,
                 headers=headers,
-                follow_redirects=False,
+                follow_redirects=False
             )
-
-            # Check for session ID in response headers (may be updated)
+            
+            # Check for session ID in response headers
             response_session_id = response.headers.get("mcp-session-id")
             if response_session_id:
                 with _http_session_lock:
                     _http_sessions[url]["session_id"] = response_session_id
-
+            
             # Check if response is SSE-formatted
             content_type = response.headers.get("content-type", "")
-
+            
             if "text/event-stream" in content_type or response.text.startswith("event:"):
                 # Parse SSE response
                 sse_response = response.text
@@ -276,7 +250,7 @@ async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
                 # Plain JSON response
                 response.raise_for_status()
                 return response.json()
-
+                
     except httpx.TimeoutException:
         return {"error": {"code": -32603, "message": "HTTP request timed out"}}
     except httpx.HTTPStatusError as e:

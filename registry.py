@@ -207,10 +207,10 @@ async def register_server(data: dict[str, Any]) -> dict[str, Any]:
             )
 
     # Validate transport type
-    if data["transport"] not in ["stdio", "sse", "docker-stdio"]:
+    if data["transport"] not in ["stdio", "sse", "streamable-http", "docker-stdio"]:
         raise HTTPException(
             status_code=400,
-            detail="Transport must be 'stdio', 'sse', or 'docker-stdio'",
+            detail="Transport must be 'stdio', 'sse', 'streamable-http', or 'docker-stdio'",
         )
 
     if data["transport"] == "stdio" and not data.get("command"):

@@ -7,11 +7,11 @@ Provides endpoints for:
 """
 
 import json
+import time
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from mcp.server.sse import SseServerTransport
 
 from config import load_config
 from execution import handle_message
@@ -49,47 +49,26 @@ async def handle_sse_endpoint(request: Request) -> StreamingResponse:
     """
     Handle SSE connections for streaming responses.
 
-    Establishes an SSE connection to the MCP server,
-    sends an initialize message, and maintains the
-    connection for streaming event delivery.
+    This endpoint maintains SSE connections for clients.
+    Actual tool calls should use the /execute endpoint with session IDs.
     """
-    config = load_config()
-
-    if not config.get("mcpServers"):
-        raise HTTPException(status_code=500, detail="No MCP servers configured")
-
-    # Find first configured server for heartbeat
-    mcp_server_name = None
-    for server_id in config.get("mcpServers", {}).keys():
-        if server_id:
-            mcp_server_name = server_id
-            break
-
-    sse = SseServerTransport("/messages")
-
     async def event_stream() -> AsyncGenerator[str, None]:
+        import asyncio
         try:
-            async with sse.connect_sse(request.url.path):
-                # Send initialize method to establish MCP session
-                await sse.handle_post_message({"method": "initialize"})
-
-                # Send heartbeat to gateway when connection established
-                if mcp_server_name:
-                    try:
-                        import urllib.request
-
-                        heartbeat_url = request.url.replace(
-                            path="/heartbeat", query=f"server={mcp_server_name}"
-                        )
-                        req = urllib.request.Request(str(heartbeat_url), method="GET")
-                        urllib.request.urlopen(req, timeout=5)
-                    except Exception:
-                        pass  # Ignore heartbeat failures
-
-                # Send connection confirmation
-                yield 'data: {"status": "connected"}\n\n'
+            # Send initial connection confirmation
+            yield 'data: {"status": "connected", "message": "SSE connection established"}\n\n'
+            
+            # Send periodic heartbeat to keep connection alive
+            for i in range(300):  # Keep connection open for ~5 minutes
+                await asyncio.sleep(15)
+                timestamp = int(time.time())
+                yield f'data: {{"status": "heartbeat", "timestamp": {timestamp}, "count": {i}}}\n\n'
+        except asyncio.CancelledError:
+            print("[SSE] Connection cancelled by client")
         except Exception as e:
             print(f"[SSE] Connection error: {e}")
-            raise
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+

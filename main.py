@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -42,7 +43,10 @@ app.add_middleware(
 # Startup event handler - runs when the application starts
 @app.on_event("startup")
 async def on_startup():
-    pass
+    # Start the background process cleanup task
+    from execution import cleanup_dead_processes
+    asyncio.create_task(cleanup_dead_processes())
+    print("[Startup] Process cleanup task started")
 
 
 # Root endpoint - loads configuration and returns status message
@@ -142,6 +146,102 @@ async def get_active_external_servers():
 async def initialize_session():
     result = create_session()
     return JSONResponse(content=result, status_code=201)
+
+
+# GET /tools - List available tools from all MCP servers
+# Handles MCP's tools/list method to discover available tools
+@app.get("/tools")
+async def list_tools(server: Optional[str] = None):
+    """Discover available tools from MCP servers"""
+    config = load_config()
+    
+    # Determine which server to query
+    target_server = server
+    
+    # If no specific server requested, try to find one
+    if not target_server:
+        server_names = list(config.get("mcpServers", {}).keys())
+        if not server_names:
+            return JSONResponse(
+                content={"error": "No MCP servers configured"},
+                status_code=404
+            )
+        target_server = server_names[0]
+    
+    # Create a tools/list request
+    tools_request = {
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "params": {},
+        "id": 1
+    }
+    
+    try:
+        # Forward the tools/list request to the server
+        result = await handle_message(tools_request, target_server)
+        
+        # Extract tools from the result
+        tools = result.get("result", {}).get("tools", [])
+        
+        return JSONResponse(content={"tools": tools, "server": target_server})
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Failed to list tools: {str(e)}"},
+            status_code=500
+        )
+
+
+# POST /tools - Alternative endpoint for tools/list via POST
+@app.post("/tools")
+async def list_tools_post(request: Request, server: Optional[str] = None):
+    """Discover available tools from MCP servers (POST variant)"""
+    config = load_config()
+    
+    # Determine which server to query
+    target_server = server
+    
+    # If no specific server requested, try to find one
+    if not target_server:
+        server_names = list(config.get("mcpServers", {}).keys())
+        if not server_names:
+            return JSONResponse(
+                content={"error": "No MCP servers configured"},
+                status_code=404
+            )
+        target_server = server_names[0]
+    
+    # Check if this is a tools/list request
+    try:
+        data = await request.json()
+        if data.get("method") == "tools/list":
+            result = await handle_message(data, target_server)
+            tools = result.get("result", {}).get("tools", [])
+            return JSONResponse(content={"tools": tools, "server": target_server})
+    except Exception:
+        pass
+    
+    # Fall back to GET-style response
+    tools_request = {
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "params": {},
+        "id": 1
+    }
+    
+    try:
+        result = await handle_message(tools_request, target_server)
+        tools = result.get("result", {}).get("tools", [])
+        return JSONResponse(content={"tools": tools, "server": target_server})
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Failed to list tools: {str(e)}"},
+            status_code=500
+        )
+
+
+# ===========================================
+# Execute Endpoints - Execute MCP tool calls
+# ===========================================
 
 
 # POST /execute - Execute MCP tool calls
