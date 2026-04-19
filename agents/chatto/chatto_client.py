@@ -6,7 +6,7 @@ to the external Model Context Protocol (MCP) Gateway.
 """
 
 import os
-import requests
+import httpx
 from typing import Any, Dict, List, Optional
 
 # Default endpoints - can be overridden via environment variables
@@ -18,14 +18,14 @@ class MCPClient:
 
     def __init__(self, mcp_gateway_url: str):
         self.mcp_gateway_url = mcp_gateway_url
-        self.session = requests.Session()
+        self.client = httpx.Client()
         self.session_id: Optional[str] = None
 
     def init_session(self) -> bool:
         """Initialize a session with the MCP Gateway."""
         try:
-            response = self.session.post(f"{self.mcp_gateway_url}/sessions")
-            if response.ok:
+            response = self.client.post(f"{self.mcp_gateway_url}/sessions")
+            if response.status_code == 201:
                 data = response.json()
                 self.session_id = data["sessionId"]
                 return True
@@ -47,8 +47,8 @@ class MCPClient:
         servers_tools: Dict[str, List[Any]] = {}
         try:
             # 1. Get all registered servers
-            response = self.session.get(f"{self.mcp_gateway_url}/registry/servers")
-            if not response.ok:
+            response = self.client.get(f"{self.mcp_gateway_url}/registry/servers")
+            if response.status_code != 200:
                 return {}
 
             servers = response.json()
@@ -57,7 +57,7 @@ class MCPClient:
                 server_id = server.get("id")
                 try:
                     # 2. Call tools/list for each server
-                    tool_response = self.session.post(
+                    tool_response = self.client.post(
                         f"{self.mcp_gateway_url}/execute?server={server_id}",
                         headers={"X-Session-ID": self.session_id},
                         json={
@@ -67,7 +67,7 @@ class MCPClient:
                             "id": 1,
                         },
                     )
-                    if tool_response.ok:
+                    if tool_response.status_code == 200:
                         data = tool_response.json()
                         tools = (
                             data.get("result", {}).get("result", {}).get("tools", [])
@@ -85,8 +85,8 @@ class MCPClient:
     def get_servers(self) -> List[Dict[str, Any]]:
         """Get list of MCP servers from the registry."""
         try:
-            response = self.session.get(f"{self.mcp_gateway_url}/registry/servers")
-            if response.ok:
+            response = self.client.get(f"{self.mcp_gateway_url}/registry/servers")
+            if response.status_code == 200:
                 return response.json()
         except:
             pass
@@ -105,7 +105,7 @@ class MCPClient:
             self.init_session()
 
         try:
-            response = self.session.post(
+            response = self.client.post(
                 f"{self.mcp_gateway_url}/execute?server={server_name}",
                 headers={
                     "X-Session-ID": self.session_id,
@@ -118,7 +118,7 @@ class MCPClient:
                     "id": 2,
                 },
             )
-            if response.ok:
+            if response.status_code == 200:
                 data = response.json()
 
                 result = data.get("result", {}).get("result", {})
@@ -127,9 +127,7 @@ class MCPClient:
                 # Extract text content from MCP response
                 if content and isinstance(content, list):
                     text_content = content[0].get("text", "")
-                    return {
-                        "content": text_content
-                    }  # Return structured dict for consistency
+                    return {"content": text_content}
 
                 return {"raw_result": str(data)}
             return {"error": response.text}

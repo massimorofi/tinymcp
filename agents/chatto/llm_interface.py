@@ -5,7 +5,7 @@ Handles prompt construction and API calling to the local language model server.
 """
 
 import os
-import requests
+import httpx
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,7 +28,7 @@ class LLMInterface:
 
     def __init__(self, lmstudio_url: Optional[str] = None):
         self.lmstudio_url = lmstudio_url or LMSTUDIO_URL
-        self.session = requests.Session()
+        self.client = httpx.Client()
 
     def query_llm(
         self,
@@ -62,10 +62,10 @@ class LLMInterface:
         }
 
         try:
-            response = self.session.post(
+            response = self.client.post(
                 f"{self.lmstudio_url}/v1/chat/completions", json=payload, timeout=120
             )
-            if response.ok:
+            if response.status_code == 200:
                 data = response.json()
                 return (
                     data.get("choices", [{}])[0].get("message", {}).get("content", "")

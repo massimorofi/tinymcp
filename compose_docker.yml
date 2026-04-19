@@ -6,8 +6,7 @@ services:
     build:
       context: ../python/tinymcp
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    network_mode: host
     environment:
       - PORT=8080
       - SECRETS_PATH=/app/secrets.json

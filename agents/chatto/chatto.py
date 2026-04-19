@@ -13,6 +13,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import sys
+from pathlib import Path
+
+# Allow running directly as `python3 chatto.py` (not via -m)
+_chatto_dir = Path(__file__).resolve().parent
+if str(_chatto_dir) not in sys.path:
+    sys.path.insert(0, str(_chatto_dir))
+
 try:
     from .chatto_client import MCPClient
     from .llm_interface import LLMInterface, load_skills
