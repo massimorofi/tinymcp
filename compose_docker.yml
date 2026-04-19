@@ -1,0 +1,86 @@
+services:
+  # ─── MCP Gateway (tinymcp) ───────────────────────────────
+  # Central gateway that aggregates all MCP servers.
+  # Reachable at http://localhost:8080
+  mcp-gateway:
+    build:
+      context: ../python/tinymcp
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - SECRETS_PATH=/app/secrets.json
+    volumes:
+      - ./config/tinymcp/config.json:/app/config.json:ro
+      - ./config/tinymcp/secrets.json:/app/secrets.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - skillsmcp
+      - desktop-commander
+      - wikipedia-mcp
+      - duckduckgo-mcp
+      - openbnb-airbnb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── Skills MCP Server (skillsmcp) ───────────────────────
+  # Provides Claude Code skills as MCP tools via streamable-http.
+  # Reachable internally at http://skillsmcp:3001/mcp
+  skillsmcp:
+    build:
+      context: ../python/skillsmcp
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - HOST=0.0.0.0
+    volumes:
+      - ./skills:/home/user/.claude/skills:ro
+      - ./config/skillsmcp/skills.settings.json:/app/skills.settings.json:ro
+    restart: unless-stopped
+
+  # ─── Docker MCP: Desktop Commander ───────────────────────
+  # File system, shell, and Docker management tools
+  desktop-commander:
+    image: mcp/desktop-commander:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${HOME}:/home/user:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: "no"
+
+  # ─── Docker MCP: Wikipedia ───────────────────────────────
+  # Wikipedia search and article retrieval
+  wikipedia-mcp:
+    image: mcp/wikipedia-mcp:latest
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+  # ─── Docker MCP: DuckDuckGo ──────────────────────────────
+  # Web search via DuckDuckGo
+  duckduckgo-mcp:
+    image: mcp/duckduckgo:latest
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+  # ─── Docker MCP: OpenBnB Airbnb ──────────────────────────
+  # Airbnb-style accommodation search
+  openbnb-airbnb:
+    image: mcp/openbnb-airbnb:latest
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+networks:
+  default:
+    name: mcp-cluster

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skills-provider": {
+      "transport": "streamable-http",
+      "url": "http://skillsmcp:3001/mcp"
+    }
+  }
+}

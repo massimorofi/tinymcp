@@ -5,11 +5,12 @@ Handles session management, tool discovery, and tool execution calls
 to the external Model Context Protocol (MCP) Gateway.
 """
 
+import os
 import requests
 from typing import Any, Dict, List, Optional
 
 # Default endpoints - can be overridden via environment variables
-MCP_GATEWAY_URL = "http://localhost:8000"
+MCP_GATEWAY_URL = os.environ.get("MCP_GATEWAY_URL", "http://localhost:8080")
 
 
 class MCPClient:

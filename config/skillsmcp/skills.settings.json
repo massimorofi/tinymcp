@@ -1,0 +1,20 @@
+{
+  "directories": [
+    "/home/user/.claude/skills"
+  ],
+  "reload": false,
+  "supporting_files": "template",
+  "http": {
+    "enabled": true,
+    "port": 3001,
+    "host": "0.0.0.0",
+    "path": "/mcp"
+  },
+  "gateway": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 8000,
+    "name": "skills-provider",
+    "transport": "streamable-http"
+  }
+}

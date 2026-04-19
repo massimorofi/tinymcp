@@ -55,7 +55,7 @@ class LLMInterface:
 
         payload = {
             "messages": messages,
-            "model": "local-model",
+            "model": "gemma-4-e4b-it",
             "temperature": 0.7,
             "max_tokens": -1,
             "stream": False,

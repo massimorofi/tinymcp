@@ -187,6 +187,38 @@ def _is_initialized(url: str) -> bool:
         return _http_sessions.get(url, {}).get("initialized", False)
 
 
+async def _read_sse_response(response: httpx.Response) -> dict[str, Any]:
+    """Read a single SSE event from the response stream and return its JSON payload."""
+    data_lines: list[str] = []
+    async for line in response.aiter_lines():
+        if line is None:
+            break
+        if line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+        elif line.strip() == "":
+            if data_lines:
+                break
+
+    if not data_lines:
+        return {
+            "error": {
+                "code": -32603,
+                "message": "No data found in SSE response",
+            }
+        }
+
+    data_text = "\n".join(data_lines).strip()
+    try:
+        return json.loads(data_text)
+    except json.JSONDecodeError:
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"Invalid JSON in SSE response: {data_text[:200]}"
+            }
+        }
+
+
 async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
     """
     Handle MCP communication via HTTP (streamable-http transport).
@@ -211,9 +243,7 @@ async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
-        async with httpx.AsyncClient(
-            timeout=30.0,
-        ) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             headers = {
                 "Accept": "application/json, text/event-stream",
                 "Content-Type": "application/json",
@@ -221,61 +251,42 @@ async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
 
             # Send initialize first if not yet initialized
             if not _is_initialized(url):
-                resp = await client.post(url, json=init_message, headers=headers)
-
-                # Store session ID from response header
-                resp_session_id = resp.headers.get("mcp-session-id")
-                if resp_session_id:
-                    with _http_session_lock:
-                        _http_sessions[url]["session_id"] = resp_session_id
-                        session_id = resp_session_id
-                _http_sessions[url]["initialized"] = True
+                async with client.stream("POST", url, json=init_message, headers=headers) as resp:
+                    resp.raise_for_status()
+                    resp_session_id = resp.headers.get("mcp-session-id")
+                    if resp_session_id:
+                        with _http_session_lock:
+                            _http_sessions[url]["session_id"] = resp_session_id
+                            session_id = resp_session_id
+                    _http_sessions[url]["initialized"] = True
+                    await resp.aread()
 
             # Now send the actual request with session ID
             headers["MCP-Session-Id"] = session_id
-            response = await client.post(
-                url,
-                json=data,
-                headers=headers,
-                follow_redirects=False,
-            )
+            async with client.stream("POST", url, json=data, headers=headers, follow_redirects=False) as response:
+                response_session_id = response.headers.get("mcp-session-id")
+                if response_session_id:
+                    with _http_session_lock:
+                        _http_sessions[url]["session_id"] = response_session_id
 
-            # Check for session ID in response headers (may be updated)
-            response_session_id = response.headers.get("mcp-session-id")
-            if response_session_id:
-                with _http_session_lock:
-                    _http_sessions[url]["session_id"] = response_session_id
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" in content_type:
+                    return await _read_sse_response(response)
 
-            # Check if response is SSE-formatted
-            content_type = response.headers.get("content-type", "")
-
-            if "text/event-stream" in content_type or response.text.startswith("event:"):
-                # Parse SSE response
-                sse_response = response.text
-                # Extract data from SSE format: "event: message\ndata: {...}\n\n"
-                if "data: " in sse_response:
-                    data_line = sse_response.split("data: ")[1].strip()
-                    # Remove trailing newlines
-                    data_line = data_line.rstrip('\n')
-                    try:
-                        return json.loads(data_line)
-                    except json.JSONDecodeError:
-                        return {
-                            "error": {
-                                "code": -32603,
-                                "message": f"Invalid JSON in SSE response: {data_line[:200]}"
-                            }
-                        }
-                return {
-                    "error": {
-                        "code": -32603,
-                        "message": f"No data found in SSE response"
+                body = await response.aread()
+                if not body:
+                    return {
+                        "error": {"code": -32603, "message": "Empty HTTP response"}
                     }
-                }
-            else:
-                # Plain JSON response
-                response.raise_for_status()
-                return response.json()
+                try:
+                    return json.loads(body.decode())
+                except json.JSONDecodeError:
+                    return {
+                        "error": {
+                            "code": -32603,
+                            "message": f"Invalid JSON response: {body[:200].decode(errors='replace')}"
+                        }
+                    }
 
     except httpx.TimeoutException:
         return {"error": {"code": -32603, "message": "HTTP request timed out"}}
@@ -285,37 +296,57 @@ async def handle_http_stdio(url: str, data: dict[str, Any]) -> dict[str, Any]:
         return {"error": {"code": -32603, "message": f"HTTP request failed: {str(e)}"}}
 
 
-# Docker process and lock management for persistent connections
-_docker_processes: Dict[str, subprocess.Popen] = {}
-_docker_process_locks: Dict[str, threading.Lock] = {}
-_docker_process_lock = threading.Lock()
+# Docker one-shot communication - MCP servers in Docker are typically
+# one-shot processes that exit after processing their input.
+# We use asyncio.create_subprocess_shell for async-safe I/O.
 
 
-def _get_docker_key(container: str, command: Optional[str] = None, args: Optional[list] = None) -> str:
-    """Generate a unique key for a docker process."""
-    cmd_str = command or ""
-    args_str = ":".join(args) if args else ""
-    return f"docker:{container}:{cmd_str}:{args_str}"
+def _build_docker_exec_args(container: str, command: Optional[str] = None, args: Optional[list] = None) -> list:
+    """Build a docker exec command as an argument list for create_subprocess_exec."""
+    cmd = ["docker", "exec", "-i", container]
+    if command:
+        cmd.append(command)
+    if args:
+        cmd.extend(args)
+    return cmd
 
 
-def _cleanup_dead_docker_process(key: str) -> None:
-    """Remove a dead docker process from the cache."""
-    global _docker_processes
-    with _docker_process_lock:
-        if key in _docker_processes:
-            proc = _docker_processes[key]
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-            except Exception:
-                pass
-            del _docker_processes[key]
-            if key in _docker_process_locks:
-                del _docker_process_locks[key]
+def _parse_docker_output(stdout: str, request_id: Any) -> dict[str, Any]:
+    """Parse docker exec stdout, filtering non-JSON log lines, and find the response for request_id."""
+    json_response = None
+    init_response = None
+
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+            if parsed.get("id") == 0 and "result" in parsed:
+                init_response = parsed
+            elif "jsonrpc" in parsed and parsed.get("id") == request_id:
+                json_response = parsed
+                break
+        except json.JSONDecodeError:
+            continue
+
+    if json_response:
+        return json_response
+
+    if init_response is not None:
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"MCP server initialized but no response for id={request_id}. stdout: {stdout[:500]}",
+            }
+        }
+
+    return {
+        "error": {
+            "code": -32603,
+            "message": f"No JSON-RPC response found. stdout: {stdout[:500]}",
+        }
+    }
 
 
 async def handle_docker_stdio(
@@ -325,147 +356,64 @@ async def handle_docker_stdio(
     args: list = None,
 ) -> dict[str, Any]:
     """
-    Handle MCP communication via Docker exec stdio.
+    Handle MCP communication via Docker exec stdio (one-shot).
 
-    Executes commands inside a running Docker container and
-    communicates via stdin/stdout. Uses persistent connections
-    for better reliability. Automatically recovers from dead processes.
+    These MCP servers are one-shot processes: they process all stdin
+    input and exit. We send both the initialize message and the actual
+    request in a single docker exec call, then parse the responses.
     """
-    key = _get_docker_key(container, command, args)
+    request_id = data.get("id")
     json_data = json.dumps(data)
 
-    # Check if persistent process exists and is alive
-    with _docker_process_lock:
-        proc = _docker_processes.get(key)
+    # Build the docker exec command as argument list
+    exec_args = _build_docker_exec_args(container, command, args)
 
-    # If process doesn't exist or is dead, create a new one
-    if proc is None or proc.poll() is not None:
-        # Clean up old dead process if it exists
-        if proc is not None:
-            _cleanup_dead_docker_process(key)
-            print(f"[Docker] Process for {key} died, restarting...")
+    # Initialize message for MCP protocol handshake
+    init_message = json.dumps({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
+        },
+        "id": 0,
+    })
 
-        # Build docker exec command
-        cmd_list = ["docker", "exec", "-i", container]
-        if command:
-            cmd_list.append(command)
-        if args:
-            cmd_list.extend(args)
+    # Send both messages (initialize + actual request) via stdin
+    stdin_input = init_message + "\n" + json_data + "\n"
 
-        # Send initialize message to establish MCP protocol
-        init_data = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
-                },
-                "id": 0,
-            }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *exec_args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
-        try:
-            with _docker_process_lock:
-                _docker_process_locks[key] = threading.Lock()
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=stdin_input.encode()),
+            timeout=30,
+        )
 
-                proc = subprocess.Popen(
-                    cmd_list,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=1,
-                )
+        stdout = stdout_bytes.decode(errors="replace")
 
-                # Send initialize request
-                proc.stdin.write((init_data + "\n").encode())
-                proc.stdin.flush()
-
-                # Wait for initialize response (skip non-JSON output)
-                init_response = proc.stdout.readline()
-                while init_response and not init_response.strip().startswith(b"{"):
-                    init_response = proc.stdout.readline()
-
-                print(f"[Docker] Init response: {init_response[:200] if init_response else 'empty'}")
-
-                with _docker_process_lock:
-                    _docker_processes[key] = proc
-
-        except Exception as e:
-            return {"error": {"code": -32603, "message": f"Failed to start docker process: {str(e)}"}}
-
-    # Check if process died during initialization
-    if proc.poll() is not None:
-        stderr = proc.stderr.read().decode()
-        _cleanup_dead_docker_process(key)
-        return {
-            "error": {
-                "code": -32603,
-                "message": f"Process ended unexpectedly. stderr: {stderr[:500]}",
-            }
-        }
-
-    # Send request and read response (thread-safe)
-    with _docker_process_locks.get(key, threading.Lock()):
-        try:
-            proc.stdin.write((json_data + "\n").encode())
-            proc.stdin.flush()
-
-            # Read response lines looking for JSON-RPC response matching request ID
-            request_id = data.get("id")
-            response_lines = []
-            while True:
-                response_line = proc.stdout.readline()
-                if not response_line:
-                    break
-                response_lines.append(response_line)
-                line_str = response_line.decode().strip()
-                if line_str.startswith("{"):
-                    try:
-                        parsed = json.loads(line_str)
-                        if parsed.get("id") == request_id or "result" in parsed or "error" in parsed:
-                            break
-                    except json.JSONDecodeError:
-                        continue
-
-            if not response_lines:
-                stderr = proc.stderr.read().decode()
-                _cleanup_dead_docker_process(key)
-                return {
-                    "error": {
-                        "code": -32603,
-                        "message": f"No response. stderr: {stderr[:500]}",
-                    }
-                }
-
-            # Parse the response
-            response_text = b"".join(response_lines).decode()
-            lines = response_text.strip().split("\n")
-            json_response = None
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                    if "jsonrpc" in parsed and parsed.get("id") == request_id:
-                        json_response = parsed
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-            if json_response:
-                return json_response
-
-            # If we couldn't find a matching response, return raw output
+        if proc.returncode != 0:
+            stderr = stderr_bytes.decode(errors="replace").strip()
             return {
-                "status": "executed",
-                "container": container,
-                "raw_response": response_text[:500],
+                "error": {
+                    "code": -32603,
+                    "message": f"docker exec failed (exit {proc.returncode}): {stderr[:500]}",
+                }
             }
 
-        except Exception as e:
-            _cleanup_dead_docker_process(key)
-            return {"error": {"code": -32603, "message": str(e)}}
+        return _parse_docker_output(stdout, request_id)
+
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return {"error": {"code": -32603, "message": "Docker exec timed out after 30s"}}
+    except Exception as e:
+        return {"error": {"code": -32603, "message": f"Docker exec failed: {str(e)}"}}

@@ -41,18 +41,21 @@ def discover_docker_mcp_servers() -> dict[str, dict[str, Any]]:
         if result.returncode == 0:
             for container_name in result.stdout.strip().split("\n"):
                 container_name = container_name.strip()
-                # Filter for tinymcp-* containers, excluding gateway
+                # Filter for tinymcp-* or mcp-cluster-* containers, excluding gateway
                 if (
-                    container_name.startswith("tinymcp-")
+                    (
+                        container_name.startswith("tinymcp-")
+                        or container_name.startswith("mcp-cluster-")
+                    )
                     and "gateway" not in container_name.lower()
                 ):
-                    # Get container command and entrypoint to determine runtime
+                    # Get container entrypoint and command via Docker inspect JSON
                     inspect_result = subprocess.run(
                         [
                             "docker",
                             "inspect",
-                            "--format",
-                            "{{.Config.Cmd}}",
+                            "-f",
+                            '{"cmd":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}}}',
                             container_name,
                         ],
                         capture_output=True,
@@ -60,36 +63,33 @@ def discover_docker_mcp_servers() -> dict[str, dict[str, Any]]:
                         timeout=10,
                     )
 
-                    entrypoint_result = subprocess.run(
-                        [
-                            "docker",
-                            "inspect",
-                            "--format",
-                            "{{.Config.Entrypoint}}",
-                            container_name,
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
+                    try:
+                        cfg = json.loads(inspect_result.stdout.strip())
+                        entrypoint = cfg.get("entrypoint") or []
+                        cmd_args = cfg.get("cmd") or []
 
-                    # Default to Node.js runtime
-                    cmd = "/usr/local/bin/node"
-                    args = ["index.js"]
+                        if entrypoint:
+                            cmd = entrypoint[0]
+                            args = entrypoint[1:] + cmd_args
+                        else:
+                            # No entrypoint override — Cmd is the full command
+                            raw = " ".join(cmd_args)
+                            if "python -m " in raw:
+                                parts = raw.split()
+                                cmd = parts[0]
+                                args = parts[1:]
+                            else:
+                                cmd = cmd_args[0] if cmd_args else "sh"
+                                args = cmd_args[1:] if len(cmd_args) > 1 else []
+                    except Exception:
+                        cmd = "sh"
+                        args = []
 
-                    combined = (
-                        inspect_result.stdout.strip()
-                        + " "
-                        + entrypoint_result.stdout.strip()
-                    ).lower()
-
-                    # Detect Python runtime
-                    if "python" in combined:
-                        cmd = "/usr/local/bin/python3"
-                        args = ["server.py"]
-                    elif "desktop-commander" in container_name.lower():
-                        cmd = "/usr/local/bin/node"
-                        args = ["dist/index.js"]
+                    # Skip containers running in HTTP mode (--http flag)
+                    # These are HTTP servers, not stdio MCP servers
+                    if args and "--http" in args:
+                        print(f"[Discovery] Skipping {container_name}: runs in HTTP mode")
+                        continue
 
                     servers[container_name] = {
                         "transport": "docker-stdio",

@@ -23,7 +23,7 @@ except ImportError:
 # Default endpoints
 LMSTUDIO_URL = os.environ.get("LMSTUDIO_URL", "http://127.0.0.1:1234")
 #LMSTUDIO_URL = os.environ.get("LMSTUDIO_URL", "http://192.168.1.134:13305/api/v1")
-MCP_GATEWAY_URL = os.environ.get("MCP_GATEWAY_URL", "http://localhost:8000")
+MCP_GATEWAY_URL = os.environ.get("MCP_GATEWAY_URL", "http://localhost:8080")
 
 
 class ChattoAgent:

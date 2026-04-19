@@ -4,6 +4,8 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 
 from config import load_config
 from registry import (
@@ -38,6 +40,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # Startup event handler - runs when the application starts
@@ -158,15 +161,19 @@ async def list_tools(server: Optional[str] = None):
     # Determine which server to query
     target_server = server
     
-    # If no specific server requested, try to find one
+    # If no specific server requested, try configured servers first
     if not target_server:
         server_names = list(config.get("mcpServers", {}).keys())
-        if not server_names:
-            return JSONResponse(
-                content={"error": "No MCP servers configured"},
-                status_code=404
-            )
-        target_server = server_names[0]
+        if server_names:
+            target_server = server_names[0]
+        else:
+            discovered = discover_docker_mcp_servers()
+            if not discovered:
+                return JSONResponse(
+                    content={"error": "No MCP servers configured or discovered"},
+                    status_code=404,
+                )
+            target_server = next(iter(discovered))
     
     # Create a tools/list request
     tools_request = {
@@ -200,15 +207,19 @@ async def list_tools_post(request: Request, server: Optional[str] = None):
     # Determine which server to query
     target_server = server
     
-    # If no specific server requested, try to find one
+    # If no specific server requested, try configured servers first
     if not target_server:
         server_names = list(config.get("mcpServers", {}).keys())
-        if not server_names:
-            return JSONResponse(
-                content={"error": "No MCP servers configured"},
-                status_code=404
-            )
-        target_server = server_names[0]
+        if server_names:
+            target_server = server_names[0]
+        else:
+            discovered = discover_docker_mcp_servers()
+            if not discovered:
+                return JSONResponse(
+                    content={"error": "No MCP servers configured or discovered"},
+                    status_code=404,
+                )
+            target_server = next(iter(discovered))
     
     # Check if this is a tools/list request
     try:
@@ -373,3 +384,55 @@ async def mcp_initialize(request: Request, server_name: Optional[str] = None):
         save_config(config)
 
     return {"status": "connected", "timestamp": current_time}
+
+
+# ===========================================
+# Frontend Serving - SPA catch-all route (must be last)
+# ===========================================
+
+# Mount static files for the frontend
+if os.path.exists("frontend/dist"):
+    app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
+    app.mount("/favicon.svg", StaticFiles(directory="frontend/dist"), name="favicon")
+    
+    # Catch-all handler for frontend SPA routing - must be last
+    from fastapi.responses import FileResponse
+    
+    @app.get("/{path:path}")
+    async def serve_frontend(path: str):
+        # Skip API routes, docs, and other FastAPI routes
+        if path.startswith(("api/", "docs", "redoc", "openapi.json", "healthz", "registry/", "sessions", "tools", "execute", "messages", "sse", "heartbeat")):
+            raise HTTPException(status_code=404, detail="Not found")
+        
+        # Serve index.html for frontend routes
+        index_path = "frontend/dist/index.html"
+        if os.path.exists(index_path):
+            return FileResponse(index_path, media_type="text/html")
+        
+        raise HTTPException(status_code=404, detail="Frontend not built")
+
+
+# ===========================================
+# Frontend Serving - SPA catch-all route (must be last)
+# ===========================================
+
+# Mount static files for the frontend
+if os.path.exists("frontend/dist"):
+    app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
+    app.mount("/favicon.svg", StaticFiles(directory="frontend/dist"), name="favicon")
+    
+    # Catch-all handler for frontend SPA routing - must be last
+    from fastapi.responses import FileResponse
+    
+    @app.get("/{path:path}")
+    async def serve_frontend(path: str):
+        # Skip API routes, docs, and other FastAPI routes
+        if path.startswith(("api/", "docs", "redoc", "openapi.json", "healthz", "registry/", "sessions", "tools", "execute", "messages", "sse", "heartbeat")):
+            raise HTTPException(status_code=404, detail="Not found")
+        
+        # Serve index.html for frontend routes
+        index_path = "frontend/dist/index.html"
+        if os.path.exists(index_path):
+            return FileResponse(index_path, media_type="text/html")
+        
+        raise HTTPException(status_code=404, detail="Frontend not built")
