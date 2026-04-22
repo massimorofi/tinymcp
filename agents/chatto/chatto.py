@@ -148,6 +148,8 @@ class ChattoAgent:
         text = text.replace("&quot;", '"').replace("&#34;", '"')
 
         text = re.sub(r"<\|tool_call>", "<tool_call>", text)
+        text = re.sub(r"<tool_call\|>", "</tool_call>", text)
+        text = re.sub(r"<\|/tool_call\|?>", "</tool_call>", text)
         text = re.sub(r"</tool_call\|>", "</tool_call>", text)
         text = re.sub(
             r"<environment_details>.*</environment_details>", "", text, flags=re.DOTALL
@@ -155,8 +157,8 @@ class ChattoAgent:
         text = text.strip()
 
         pattern1 = r"<tool_call>\s*tool:\s*(\S+)\s*name:\s*(\S+)\s*arguments:\s*(\{.*?\})\s*</tool_call>"
-        pattern2 = r"<tool_call>\s+call\s*\n\s*tool:\s*(\S+)\s*\n\s*name:\s*(\S+)\s*\n\s*arguments:\s*(\{.*?\})\s*</tool_call>"
-        pattern3 = r"<tool_call>\s+call:\s*(\S+)\s*\n\s*name:\s*(\S+)\s*\n\s*arguments:\s*(\{.*?\})\s*</tool_call>"
+        pattern2 = r"<tool_call>\s*call\s*\n\s*tool:\s*(\S+)\s*\n\s*name:\s*(\S+)\s*\n\s*arguments:\s*(\{.*?\})\s*</tool_call>"
+        pattern3 = r"<tool_call>\s*call:\s*(\S+)\s*\n\s*name:\s*(\S+)\s*\n\s*arguments:\s*(\{.*?\})\s*</tool_call>"
         pattern4 = r"<tool_call>\s*call\s+tool:\s*(\S+)\s*name:\s*(\S+)\s*arguments:\s*(\{.*?\})\s*</tool_call>"
 
         for pattern in [pattern1, pattern2, pattern3, pattern4]:
@@ -289,8 +291,10 @@ class ChattoAgent:
             print(f"[DEBUG] LLM response (iteration {iteration}): {response[:200]}...")
 
             tool_calls = self._parse_tool_calls(response)
+            print(f"[DEBUG] Tool calls found: {len(tool_calls)} -> {[(tc.get('server'), tc.get('name')) for tc in tool_calls]}")
 
             if not tool_calls:
+                print(f"[DEBUG] No tool calls found, breaking out of loop")
                 break
 
             results = []
@@ -311,14 +315,42 @@ class ChattoAgent:
             current_prompt = (
                 f"User question: {user_message}\n\n"
                 f"Tool execution results from iteration {iteration}:\n{results_str}\n\n"
-                f"If you need more information, make another tool call. "
-                f"Otherwise, provide a complete and helpful answer."
+                f"ANALYZE the results above. If you have enough information, "
+                f"provide a complete natural language answer. DO NOT output tool call tags."
             )
 
+        print(f"[DEBUG] After loop: iteration={iteration}, tool_calls={len(tool_calls) if tool_calls else 0}")
         if tool_calls:
             response = self.llm_interface.query_llm(
                 f"User question: {user_message}\n\nTool execution results:\n{results_str}\n\n"
-                f"Please provide a helpful answer based on these results.",
+                f"ANSWER the user's question using the tool results above. "
+                f"Write a natural language response. DO NOT use any tool calls.",
+                base_skills=self.base_skills,
+                tool_format=self.tool_format,
+            )
+
+            # If the LLM still outputs tool calls in the final response,
+            # execute them and generate a real answer
+            print(f"[DEBUG] Final LLM response: {response[:300]}...")
+            final_tool_calls = self._parse_tool_calls(response)
+            print(f"[DEBUG] Final tool calls parsed: {final_tool_calls}")
+            if final_tool_calls:
+                print(f"[DEBUG] LLM re-emitted tool calls in final response, executing...")
+                for tc in final_tool_calls:
+                    server = tc.get("server")
+                    tool_name = tc.get("name")
+                    args = tc.get("arguments", {})
+                    if not server or not tool_name:
+                        continue
+                    print(f"[DEBUG] Executing {server}.{tool_name} with {args}")
+                    result = self.mcp_client.execute_tool(server, tool_name, args)
+                    print(f"[DEBUG] Result: {result}")
+                    results.append(result)
+                results_str = "\n\n".join([json.dumps(r) for r in results])
+
+            response = self.llm_interface.query_llm(
+                f"User question: {user_message}\n\nTool execution results:\n{results_str}\n\n"
+                f"Write a helpful natural language answer. DO NOT use tool calls.",
                 base_skills=self.base_skills,
                 tool_format=self.tool_format,
             )

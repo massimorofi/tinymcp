@@ -361,6 +361,11 @@ async def handle_docker_stdio(
     These MCP servers are one-shot processes: they process all stdin
     input and exit. We send both the initialize message and the actual
     request in a single docker exec call, then parse the responses.
+
+    IMPORTANT: We keep stdin open after sending messages to allow the
+    server time to process slow tool calls (e.g., HTTP requests to
+    Wikipedia). Closing stdin too early causes the MCP stdio transport
+    to drop pending responses.
     """
     request_id = data.get("id")
     json_data = json.dumps(data)
@@ -391,15 +396,95 @@ async def handle_docker_stdio(
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=stdin_input.encode()),
-            timeout=30,
-        )
+        # Write all input at once but DON'T close stdin via communicate().
+        # Closing stdin too early causes the MCP stdio transport to drop
+        # pending responses for slow tool calls (e.g., Wikipedia HTTP requests).
+        proc.stdin.write(stdin_input.encode())
+        await proc.stdin.drain()
 
-        stdout = stdout_bytes.decode(errors="replace")
+        # Read stdout line by line with a timeout, collecting all JSON-RPC responses
+        stdout_lines = []
+        total_timeout = 30.0
+        idle_timeout = 3.0  # Seconds of no data before we assume done
+        start_time = asyncio.get_event_loop().time()
+        got_init = False
+        got_response = False
+
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > total_timeout:
+                proc.kill()
+                await proc.wait()
+                return {"error": {"code": -32603, "message": "Docker exec timed out after 30s"}}
+
+            remaining = total_timeout - elapsed
+            try:
+                line = await asyncio.wait_for(
+                    proc.stdout.readline(),
+                    timeout=min(idle_timeout, remaining),
+                )
+            except asyncio.TimeoutError:
+                # No data within idle window
+                if got_init and got_response:
+                    break
+                continue
+
+            if not line:
+                # EOF - server closed stdout
+                break
+
+            stdout_lines.append(line)
+
+            # Check what we received
+            try:
+                parsed = json.loads(line.decode())
+                if parsed.get("id") == 0 and "result" in parsed:
+                    got_init = True
+                    print(f"[Docker] Got init response from {container}")
+                if "jsonrpc" in parsed and parsed.get("id") == request_id:
+                    got_response = True
+                    print(f"[Docker] Got response for id={request_id} from {container}")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+            # Only break after idle timeout (not immediately on response match).
+            # Slow tool calls (e.g., Wikipedia HTTP requests) take seconds —
+            # we must keep stdin open and keep reading until the response arrives.
+            if got_response:
+                # Response received — wait briefly for it to settle, then break
+                print(f"[Docker] Response received, waiting briefly for {container}")
+                await asyncio.sleep(0.5)
+                break
+
+        # Close stdin to signal the server we're done — triggers flush and exit
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+
+        # Collect any remaining output after stdin close
+        try:
+            remaining_out = await asyncio.wait_for(
+                proc.stdout.read(), timeout=2.0
+            )
+            if remaining_out:
+                stdout_lines.append(remaining_out)
+        except asyncio.TimeoutError:
+            pass
+
+        stderr_bytes = await proc.stderr.read()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+        # Decode all collected output
+        stdout = b"".join(stdout_lines).decode(errors="replace")
 
         if proc.returncode != 0:
             stderr = stderr_bytes.decode(errors="replace").strip()
+            print(f"[Docker] Non-zero exit ({proc.returncode}) for {container}: {stderr[:200]}")
             return {
                 "error": {
                     "code": -32603,
