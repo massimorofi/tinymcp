@@ -52,6 +52,13 @@ async def handle_sse_endpoint(request: Request) -> StreamingResponse:
     This endpoint maintains SSE connections for clients.
     Actual tool calls should use the /execute endpoint with session IDs.
     """
+    config = load_config()
+    if not config.get("mcpServers"):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "No MCP servers configured"},
+        )
+
     async def event_stream() -> AsyncGenerator[str, None]:
         import asyncio
         try:

@@ -1,9 +1,17 @@
 """Pytest fixtures for MCP Gateway tests."""
 
+import os
 import pytest
 import json
 from fastapi.testclient import TestClient
 from main import app
+
+
+@pytest.fixture(autouse=True)
+def disable_docker_discovery():
+    os.environ["TINYMCP_DISABLE_DOCKER_DISCOVERY"] = "1"
+    yield
+    os.environ.pop("TINYMCP_DISABLE_DOCKER_DISCOVERY", None)
 
 
 @pytest.fixture

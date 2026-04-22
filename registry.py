@@ -8,6 +8,7 @@ Provides functions for:
 """
 
 import json
+import os
 from typing import Any, Optional
 import httpx
 from fastapi import HTTPException
@@ -28,6 +29,9 @@ def discover_docker_mcp_servers() -> dict[str, dict[str, Any]]:
     inspects them to determine the runtime (Python/Node), and returns server configurations.
     """
     servers = {}
+
+    if os.environ.get("TINYMCP_DISABLE_DOCKER_DISCOVERY", "").lower() in {"1", "true", "yes"}:
+        return {}
 
     try:
         # Get list of running Docker containers
